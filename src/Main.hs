@@ -38,7 +38,6 @@ main = do
   case result of
     Left err -> print err
     Right () -> return ()
-  undefined
   where
     defaultRmConnStr = Hasql.Connection.settings "localhost" 15432 "postgres" "secret" "postgres"
     defaultEsConnStr = postgreSQLConnectionString $ ConnectInfo "localhost" 5432 "postgres" "secret" "postgres"
@@ -62,7 +61,7 @@ handle connection (VersionedEvent _ event) =
   case event of
     GameCreated streamId clientId color -> insertChallenge connection streamId clientId color
     GameJoined streamId clientId -> gameJoined connection streamId clientId
-    YellowPlayed _ _ -> undefined
+    YellowPlayed streamId column -> undefined
     RedPlayed _ _ -> undefined
     GameWon _ _ -> undefined
     GameTied _ -> undefined
@@ -107,7 +106,7 @@ colorDecoder = D.custom toColor
 insertChallengeStatement :: Statement (StreamId, ClientId, Color) ()
 insertChallengeStatement = Statement sql encoder decoder True
   where
-    sql = "INSERT INTO challenges_internal (id, client_id, color) VALUES ($1, $2, $3)"
+    sql = "INSERT INTO challenges_internal (id, client_id, color) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING"
     encoder =
       contrazip3
         (E.param (E.nonNullable streamIdEncoder))
@@ -122,7 +121,7 @@ insertChallenge :: ReadModelConnection -> StreamId -> ClientId -> Color -> IO ()
 insertChallenge conn streamId clientId color = do
   dbResult <- run (insertChallengeSession streamId clientId color) conn
   case dbResult of
-    Left err -> error (show err)
+    Left err -> print err
     Right _ -> return ()
 
 ---- GAME JOINED ----
@@ -173,4 +172,4 @@ gameJoined connection streamId clientId = do
   dbResult <- run (insertGameSession streamId clientId) connection
   case dbResult of
     Right _ -> return ()
-    Left err -> error $ show err
+    Left err -> print err
