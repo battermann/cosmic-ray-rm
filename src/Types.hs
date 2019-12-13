@@ -4,6 +4,7 @@
 module Types where
 
 import Data.Aeson
+import Data.Int
 import Data.UUID
 import GHC.Generics
 
@@ -26,7 +27,7 @@ newtype StreamId = StreamId UUID deriving (Eq, Ord, Show, Generic)
 
 instance FromJSON StreamId
 
-newtype Column = Column Int deriving (Eq, Ord, Show, Generic)
+newtype Column = Column Int32 deriving (Eq, Ord, Show, Generic)
 
 instance FromJSON Column
 
@@ -41,7 +42,7 @@ data Event
 
 instance FromJSON Event
 
-newtype Version = Version Int
+newtype Version = Version Int32
   deriving (Eq, Show, Generic)
 
 instance FromJSON Version

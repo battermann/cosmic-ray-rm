@@ -4,12 +4,12 @@
 module Main where
 
 import Contravariant.Extras.Contrazip
+import Control.Monad
 import Data.Aeson
 import qualified Data.ByteString.Char8 as C
 import qualified Data.ByteString.Lazy as BL
 import Data.Foldable
 import Data.Functor.Contravariant
-import Data.Int
 import Database.PostgreSQL.Simple (ConnectInfo (..), Connection, connectPostgreSQL, execute_, postgreSQLConnectionString)
 import Database.PostgreSQL.Simple.Notification (getNotification, notificationData)
 import qualified Hasql.Connection
@@ -57,12 +57,12 @@ loop connection rmConnection = do
   loop connection rmConnection
 
 handle :: ReadModelConnection -> VersionedEvent -> IO ()
-handle connection (VersionedEvent _ event) =
+handle connection (VersionedEvent version event) =
   case event of
     GameCreated streamId clientId color -> insertChallenge connection streamId clientId color
     GameJoined streamId clientId -> gameJoined connection streamId clientId
-    YellowPlayed streamId column -> undefined
-    RedPlayed _ _ -> undefined
+    YellowPlayed streamId column -> played connection version streamId column
+    RedPlayed streamId column -> played connection version streamId column
     GameWon _ _ -> undefined
     GameTied _ -> undefined
 
@@ -90,6 +90,12 @@ clientIdEncoder = contramap (\(ClientId clientId) -> clientId) E.uuid
 versionEncoder :: E.Value Version
 versionEncoder = contramap (\(Version version) -> fromIntegral version) E.int4
 
+columnEncoder :: E.Value Column
+columnEncoder = contramap (\(Column column) -> fromIntegral column) E.int4
+
+movesEncoder :: E.Value [Column]
+movesEncoder = E.array (E.dimension foldl' (E.element (E.nonNullable columnEncoder)))
+
 ---- DECODER ----
 
 colorDecoder :: D.Value Color
@@ -100,6 +106,48 @@ colorDecoder = D.custom toColor
         "red" -> Right Red
         "yellow" -> Right Yellow
         _ -> Left "invalid value for color"
+
+movesDecoder :: D.Value [Column]
+movesDecoder = D.array (D.dimension replicateM (D.element (D.nonNullable (Column <$> D.int4))))
+
+---- YELLOW PLAYED ----
+
+selectGameStatement :: Statement StreamId (Version, [Column])
+selectGameStatement = Statement sql encoder decoder True
+  where
+    sql = "SELECT version, moves FROM games_internal WHERE id=$1"
+    encoder = E.param (E.nonNullable streamIdEncoder)
+    decoder = D.singleRow ((,) <$> D.column (D.nonNullable (Version <$> D.int4)) <*> D.column (D.nonNullable movesDecoder))
+
+updateGameStatement :: Statement ([Column], Version, StreamId) ()
+updateGameStatement = Statement sql encoder decoder True
+  where
+    sql = "UPDATE games_internal SET moves=$1, version=$2 WHERE id=$3"
+    encoder =
+      contrazip3
+        (E.param (E.nonNullable movesEncoder))
+        (E.param (E.nonNullable versionEncoder))
+        (E.param (E.nonNullable streamIdEncoder))
+    decoder = D.noResult
+
+updateGameTransaction :: Version -> StreamId -> Column -> Tx.Transaction ()
+updateGameTransaction version streamId column = do
+  (previousVersion, moves) <- Tx.statement streamId selectGameStatement
+  when (isInc1 previousVersion version) $ Tx.statement (moves ++ [column], version, streamId) updateGameStatement
+  where
+    isInc1 :: Version -> Version -> Bool
+    isInc1 (Version previous) (Version next) = next == previous + 1
+
+updateGameSession :: Version -> StreamId -> Column -> Session ()
+updateGameSession version streamId column =
+  transaction Serializable Write (updateGameTransaction version streamId column)
+
+played :: ReadModelConnection -> Version -> StreamId -> Column -> IO ()
+played connection version streamId column = do
+  dbResult <- run (updateGameSession version streamId column) connection
+  case dbResult of
+    Right _ -> return ()
+    Left err -> print err
 
 ---- GAME CREATED ----
 
@@ -133,7 +181,7 @@ selectChallengeStatement = Statement sql encoder decoder True
     encoder = E.param (E.nonNullable streamIdEncoder)
     decoder = D.singleRow ((,) <$> D.column (D.nonNullable (ClientId <$> D.uuid)) <*> D.column (D.nonNullable colorDecoder))
 
-insertGameStatement :: Statement (StreamId, Version, GameState, [Int32], ClientId, ClientId) ()
+insertGameStatement :: Statement (StreamId, Version, GameState, [Column], ClientId, ClientId) ()
 insertGameStatement = Statement sql encoder decoder True
   where
     sql = "INSERT INTO games_internal (id, version, game_state, moves, player_red, player_yellow) VALUES ($1, $2, $3, $4, $5, $6)"
@@ -142,7 +190,7 @@ insertGameStatement = Statement sql encoder decoder True
         (E.param (E.nonNullable streamIdEncoder))
         (E.param (E.nonNullable versionEncoder))
         (E.param (E.nonNullable gameStateEncoder))
-        (E.param (E.nonNullable (E.array (E.dimension foldl' (E.element (E.nonNullable E.int4))))))
+        (E.param (E.nonNullable movesEncoder))
         (E.param (E.nonNullable clientIdEncoder))
         (E.param (E.nonNullable clientIdEncoder))
     decoder = D.noResult
