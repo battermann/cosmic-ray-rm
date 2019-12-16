@@ -52,5 +52,5 @@ data VersionedEvent = VersionedEvent Version Event
 
 instance FromJSON VersionedEvent
 
-data GameState = InProgress
+data GameState = InProgress | YellowWon | RedWon | Draw
   deriving (Eq, Show, Generic)

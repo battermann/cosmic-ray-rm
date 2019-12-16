@@ -63,8 +63,8 @@ handle connection (VersionedEvent version event) =
     GameJoined streamId clientId -> gameJoined connection streamId clientId
     YellowPlayed streamId column -> played connection version streamId column
     RedPlayed streamId column -> played connection version streamId column
-    GameWon _ _ -> undefined
-    GameTied _ -> undefined
+    GameWon streamId clientId -> gameWon connection version streamId clientId
+    GameTied streamId -> draw connection version streamId
 
 ---- ENCODER ----
 
@@ -80,6 +80,9 @@ gameStateEncoder = contramap gameStateText E.text
   where
     gameStateText gameState = case gameState of
       InProgress -> "in_progress"
+      YellowWon -> "yellow_won"
+      RedWon -> "red_won"
+      Draw -> "draw"
 
 streamIdEncoder :: E.Value StreamId
 streamIdEncoder = contramap (\(StreamId streamId) -> streamId) E.uuid
@@ -110,7 +113,88 @@ colorDecoder = D.custom toColor
 movesDecoder :: D.Value [Column]
 movesDecoder = D.array (D.dimension replicateM (D.element (D.nonNullable (Column <$> D.int4))))
 
----- YELLOW PLAYED ----
+---- GAME TIED ----
+
+updateGameTiedStatement :: Statement (Version, StreamId) ()
+updateGameTiedStatement = Statement sql encoder decoder True
+  where
+    sql = "UPDATE games_internal SET version=$1, game_state='draw' WHERE id=$2"
+    encoder =
+      contrazip2
+        (E.param (E.nonNullable versionEncoder))
+        (E.param (E.nonNullable streamIdEncoder))
+    decoder = D.noResult
+
+updateGameTiedTransaction :: Version -> StreamId -> Tx.Transaction ()
+updateGameTiedTransaction version streamId = do
+  (previousVersion, _) <- Tx.statement streamId selectGameStatement
+  when (isInc1 previousVersion version) $ Tx.statement (version, streamId) updateGameTiedStatement
+  where
+    isInc1 :: Version -> Version -> Bool
+    isInc1 (Version previous) (Version next) = next == previous + 1
+
+updateGameTiedSession :: Version -> StreamId -> Session ()
+updateGameTiedSession version streamId =
+  transaction Serializable Write (updateGameTiedTransaction version streamId)
+
+draw :: ReadModelConnection -> Version -> StreamId -> IO ()
+draw connection version streamId = do
+  dbResult <- run (updateGameTiedSession version streamId) connection
+  case dbResult of
+    Right _ -> return ()
+    Left err -> print err
+
+---- GAME WON ----
+
+selectGameVersionStatement :: Statement StreamId (Version, ClientId, ClientId)
+selectGameVersionStatement = Statement sql encoder decoder True
+  where
+    sql = "SELECT version, player_red, player_yellow FROM games_internal WHERE id=$1"
+    encoder = E.param (E.nonNullable streamIdEncoder)
+    decoder =
+      D.singleRow
+        ( (,,) <$> D.column (D.nonNullable (Version <$> D.int4))
+            <*> D.column (D.nonNullable (ClientId <$> D.uuid))
+            <*> D.column (D.nonNullable (ClientId <$> D.uuid))
+        )
+
+updateGameWonStatement :: Statement (Version, StreamId, GameState) ()
+updateGameWonStatement = Statement sql encoder decoder True
+  where
+    sql = "UPDATE games_internal SET version=$1, game_state=$3 WHERE id=$2"
+    encoder =
+      contrazip3
+        (E.param (E.nonNullable versionEncoder))
+        (E.param (E.nonNullable streamIdEncoder))
+        (E.param (E.nonNullable gameStateEncoder))
+    decoder = D.noResult
+
+updateGameWonTransaction :: Version -> StreamId -> ClientId -> Tx.Transaction ()
+updateGameWonTransaction version streamId clientId = do
+  (previousVersion, playerRed, playerYellow) <- Tx.statement streamId selectGameVersionStatement
+  when (isInc1 previousVersion version) $ do
+    if playerRed == clientId
+      then Tx.statement (version, streamId, RedWon) updateGameWonStatement
+      else
+        if playerYellow == clientId
+          then Tx.statement (version, streamId, YellowWon) updateGameWonStatement
+          else return ()
+  where
+    isInc1 :: Version -> Version -> Bool
+    isInc1 (Version previous) (Version next) = next == previous + 1
+
+updateGameWonSession :: Version -> StreamId -> ClientId -> Session ()
+updateGameWonSession version streamId clientId =
+  transaction Serializable Write (updateGameWonTransaction version streamId clientId)
+
+gameWon :: ReadModelConnection -> Version -> StreamId -> ClientId -> IO ()
+gameWon connection version streamId clientId = do
+  dbResult <- run (updateGameWonSession version streamId clientId) connection
+  case dbResult of
+    Right _ -> return ()
+    Left err -> print err
+
+---- YELLOW/RED PLAYED ----
 
 selectGameStatement :: Statement StreamId (Version, [Column])
 selectGameStatement = Statement sql encoder decoder True
