@@ -20,6 +20,7 @@ import Hasql.Statement (Statement (..))
 import qualified Hasql.Transaction as Tx
 import Hasql.Transaction.Sessions
 import System.Environment
+import System.IO (hFlush, stdout)
 import Types
 
 type ReadModelConnection = Hasql.Connection.Connection
@@ -49,11 +50,14 @@ listenAndLoop esConn rmConn = do
 
 loop :: EventStoreConnection -> ReadModelConnection -> IO ()
 loop connection rmConnection = do
+  hFlush stdout
   notification <- getNotification connection
   let maybeEvent = decode ((BL.fromStrict . notificationData) notification) :: Maybe VersionedEvent
   _ <- case maybeEvent of
-    Just event -> handle rmConnection event
-    Nothing -> putStrLn "Could not decode msg"
+    Just event -> do
+      putStrLn $ "Received event\n" <> show event
+      handle rmConnection event
+    Nothing -> putStrLn $ "Could not decode msg\n" <> show notification
   loop connection rmConnection
 
 handle :: ReadModelConnection -> VersionedEvent -> IO ()
@@ -141,8 +145,8 @@ draw :: ReadModelConnection -> Version -> StreamId -> IO ()
 draw connection version streamId = do
   dbResult <- run (updateGameTiedSession version streamId) connection
   case dbResult of
-    Right _ -> return ()
     Left err -> print err
+    Right _ -> return ()
 
 ---- GAME WON ----
 
@@ -172,13 +176,12 @@ updateGameWonStatement = Statement sql encoder decoder True
 updateGameWonTransaction :: Version -> StreamId -> ClientId -> Tx.Transaction ()
 updateGameWonTransaction version streamId clientId = do
   (previousVersion, playerRed, playerYellow) <- Tx.statement streamId selectGameVersionStatement
-  when (isInc1 previousVersion version) $ do
+  when (isInc1 previousVersion version) $
     if playerRed == clientId
       then Tx.statement (version, streamId, RedWon) updateGameWonStatement
       else
-        if playerYellow == clientId
-          then Tx.statement (version, streamId, YellowWon) updateGameWonStatement
-          else return ()
+        when (playerYellow == clientId) $
+          Tx.statement (version, streamId, YellowWon) updateGameWonStatement
   where
     isInc1 :: Version -> Version -> Bool
     isInc1 (Version previous) (Version next) = next == previous + 1
@@ -191,8 +194,8 @@ gameWon :: ReadModelConnection -> Version -> StreamId -> ClientId -> IO ()
 gameWon connection version streamId clientId = do
   dbResult <- run (updateGameWonSession version streamId clientId) connection
   case dbResult of
-    Right _ -> return ()
     Left err -> print err
+    Right _ -> return ()
 
 ---- YELLOW/RED PLAYED ----
 
@@ -230,8 +233,8 @@ played :: ReadModelConnection -> Version -> StreamId -> Column -> IO ()
 played connection version streamId column = do
   dbResult <- run (updateGameSession version streamId column) connection
   case dbResult of
-    Right _ -> return ()
     Left err -> print err
+    Right _ -> return ()
 
 ---- GAME CREATED ----
 
@@ -303,5 +306,5 @@ gameJoined :: ReadModelConnection -> StreamId -> ClientId -> IO ()
 gameJoined connection streamId clientId = do
   dbResult <- run (insertGameSession streamId clientId) connection
   case dbResult of
-    Right _ -> return ()
     Left err -> print err
+    Right _ -> return ()
