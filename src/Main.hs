@@ -35,17 +35,14 @@ main = do
   let esConnStr = maybe defaultEsConnStr C.pack eventStoreEnv
   rmConnOrError <- Hasql.Connection.acquire rmConnStr
   esConn <- connectPostgreSQL esConnStr
-  result <- listenAndLoop esConn `traverse` rmConnOrError
-  case result of
-    Left err -> print err
-    Right () -> return ()
+  void $ listenAndLoop esConn `traverse` rmConnOrError
   where
     defaultRmConnStr = Hasql.Connection.settings "localhost" 15432 "postgres" "secret" "postgres"
     defaultEsConnStr = postgreSQLConnectionString $ ConnectInfo "localhost" 5432 "postgres" "secret" "postgres"
 
 listenAndLoop :: EventStoreConnection -> ReadModelConnection -> IO ()
 listenAndLoop esConn rmConn = do
-  _ <- execute_ esConn "LISTEN events"
+  void $ execute_ esConn "LISTEN events"
   loop esConn rmConn
 
 loop :: EventStoreConnection -> ReadModelConnection -> IO ()
@@ -53,7 +50,7 @@ loop connection rmConnection = do
   hFlush stdout
   notification <- getNotification connection
   let maybeEvent = decode ((BL.fromStrict . notificationData) notification) :: Maybe VersionedEvent
-  _ <- case maybeEvent of
+  void $ case maybeEvent of
     Just event -> do
       putStrLn $ "Received event\n" <> show event
       handle rmConnection event
@@ -131,7 +128,7 @@ updateGameTiedStatement = Statement sql encoder decoder True
 
 updateGameTiedTransaction :: Version -> StreamId -> Tx.Transaction ()
 updateGameTiedTransaction version streamId = do
-  (previousVersion, _) <- Tx.statement streamId selectGameStatement
+  (previousVersion, _) <- Tx.statement streamId selectMovesStatement
   when (isInc1 previousVersion version) $ Tx.statement (version, streamId) updateGameTiedStatement
   where
     isInc1 :: Version -> Version -> Bool
@@ -144,14 +141,12 @@ updateGameTiedSession version streamId =
 draw :: ReadModelConnection -> Version -> StreamId -> IO ()
 draw connection version streamId = do
   dbResult <- run (updateGameTiedSession version streamId) connection
-  case dbResult of
-    Left err -> print err
-    Right _ -> return ()
+  logOnError dbResult
 
 ---- GAME WON ----
 
-selectGameVersionStatement :: Statement StreamId (Version, ClientId, ClientId)
-selectGameVersionStatement = Statement sql encoder decoder True
+selectPlayersStatement :: Statement StreamId (Version, ClientId, ClientId)
+selectPlayersStatement = Statement sql encoder decoder True
   where
     sql = "SELECT version, player_red, player_yellow FROM games_internal WHERE id=$1"
     encoder = E.param (E.nonNullable streamIdEncoder)
@@ -175,7 +170,7 @@ updateGameWonStatement = Statement sql encoder decoder True
 
 updateGameWonTransaction :: Version -> StreamId -> ClientId -> Tx.Transaction ()
 updateGameWonTransaction version streamId clientId = do
-  (previousVersion, playerRed, playerYellow) <- Tx.statement streamId selectGameVersionStatement
+  (previousVersion, playerRed, playerYellow) <- Tx.statement streamId selectPlayersStatement
   when (isInc1 previousVersion version) $
     if playerRed == clientId
       then Tx.statement (version, streamId, RedWon) updateGameWonStatement
@@ -193,14 +188,12 @@ updateGameWonSession version streamId clientId =
 gameWon :: ReadModelConnection -> Version -> StreamId -> ClientId -> IO ()
 gameWon connection version streamId clientId = do
   dbResult <- run (updateGameWonSession version streamId clientId) connection
-  case dbResult of
-    Left err -> print err
-    Right _ -> return ()
+  logOnError dbResult
 
 ---- YELLOW/RED PLAYED ----
 
-selectGameStatement :: Statement StreamId (Version, [Column])
-selectGameStatement = Statement sql encoder decoder True
+selectMovesStatement :: Statement StreamId (Version, [Column])
+selectMovesStatement = Statement sql encoder decoder True
   where
     sql = "SELECT version, moves FROM games_internal WHERE id=$1"
     encoder = E.param (E.nonNullable streamIdEncoder)
@@ -219,7 +212,7 @@ updateGameStatement = Statement sql encoder decoder True
 
 updateGameTransaction :: Version -> StreamId -> Column -> Tx.Transaction ()
 updateGameTransaction version streamId column = do
-  (previousVersion, moves) <- Tx.statement streamId selectGameStatement
+  (previousVersion, moves) <- Tx.statement streamId selectMovesStatement
   when (isInc1 previousVersion version) $ Tx.statement (moves ++ [column], version, streamId) updateGameStatement
   where
     isInc1 :: Version -> Version -> Bool
@@ -232,9 +225,7 @@ updateGameSession version streamId column =
 played :: ReadModelConnection -> Version -> StreamId -> Column -> IO ()
 played connection version streamId column = do
   dbResult <- run (updateGameSession version streamId column) connection
-  case dbResult of
-    Left err -> print err
-    Right _ -> return ()
+  logOnError dbResult
 
 ---- GAME CREATED ----
 
@@ -255,9 +246,7 @@ insertChallengeSession streamId clientId color = Session.statement (streamId, cl
 insertChallenge :: ReadModelConnection -> StreamId -> ClientId -> Color -> IO ()
 insertChallenge conn streamId clientId color = do
   dbResult <- run (insertChallengeSession streamId clientId color) conn
-  case dbResult of
-    Left err -> print err
-    Right _ -> return ()
+  logOnError dbResult
 
 ---- GAME JOINED ----
 
@@ -305,6 +294,8 @@ insertGameSession streamId clientId =
 gameJoined :: ReadModelConnection -> StreamId -> ClientId -> IO ()
 gameJoined connection streamId clientId = do
   dbResult <- run (insertGameSession streamId clientId) connection
-  case dbResult of
-    Left err -> print err
-    Right _ -> return ()
+  logOnError dbResult
+
+logOnError :: Show e => Either e a -> IO ()
+logOnError (Left err) = print err
+logOnError (Right _) = pure ()
