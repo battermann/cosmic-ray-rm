@@ -11,7 +11,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Foldable
 import Data.Functor.Contravariant
 import Database.PostgreSQL.Simple (ConnectInfo (..), Connection, connectPostgreSQL, execute_, postgreSQLConnectionString)
-import Database.PostgreSQL.Simple.Notification (getNotification, notificationData)
+import Database.PostgreSQL.Simple.Notification (Notification, getNotification, notificationData)
 import qualified Hasql.Connection
 import qualified Hasql.Decoders as D
 import qualified Hasql.Encoders as E
@@ -25,7 +25,7 @@ import Types
 
 type ReadModelConnection = Hasql.Connection.Connection
 
-type EventStoreConnection = Database.PostgreSQL.Simple.Connection
+type EventStoreConnection = Hasql.Connection.Connection
 
 main :: IO ()
 main = do
@@ -35,27 +35,28 @@ main = do
   let esConnStr = maybe defaultEsConnStr C.pack eventStoreEnv
   rmConnOrError <- Hasql.Connection.acquire rmConnStr
   esConn <- connectPostgreSQL esConnStr
+  void $ reBuildReadModel undefined `traverse` rmConnOrError
   void $ listenAndLoop esConn `traverse` rmConnOrError
   where
     defaultRmConnStr = Hasql.Connection.settings "localhost" 15432 "postgres" "secret" "postgres"
     defaultEsConnStr = postgreSQLConnectionString $ ConnectInfo "localhost" 5432 "postgres" "secret" "postgres"
 
-listenAndLoop :: EventStoreConnection -> ReadModelConnection -> IO ()
+listenAndLoop :: Database.PostgreSQL.Simple.Connection -> ReadModelConnection -> IO ()
 listenAndLoop esConn rmConn = do
   void $ execute_ esConn "LISTEN events"
-  loop esConn rmConn
+  loop (const $ getNotification esConn) rmConn
 
-loop :: EventStoreConnection -> ReadModelConnection -> IO ()
-loop connection rmConnection = do
+loop :: (() -> IO Notification) -> ReadModelConnection -> IO ()
+loop listen rmConnection = do
   hFlush stdout
-  notification <- getNotification connection
+  notification <- listen ()
   let maybeEvent = decode ((BL.fromStrict . notificationData) notification) :: Maybe VersionedEvent
   void $ case maybeEvent of
     Just event -> do
       putStrLn $ "Received event\n" <> show event
       handle rmConnection event
     Nothing -> putStrLn $ "Could not decode msg\n" <> show notification
-  loop connection rmConnection
+  loop listen rmConnection
 
 handle :: ReadModelConnection -> VersionedEvent -> IO ()
 handle connection (VersionedEvent version event) =
@@ -66,6 +67,11 @@ handle connection (VersionedEvent version event) =
     RedPlayed streamId column -> played connection version streamId column
     GameWon streamId clientId -> gameWon connection version streamId clientId
     GameTied streamId -> draw connection version streamId
+
+reBuildReadModel :: EventStoreConnection -> ReadModelConnection -> IO ()
+reBuildReadModel esConn rmConn = do
+  delete rmConn "games_internal"
+  delete rmConn "challenges_internal"
 
 ---- ENCODER ----
 
@@ -113,6 +119,20 @@ colorDecoder = D.custom toColor
 
 movesDecoder :: D.Value [Column]
 movesDecoder = D.array (D.dimension replicateM (D.element (D.nonNullable (Column <$> D.int4))))
+
+---- DELETE ----
+
+deleteStatement :: C.ByteString -> Statement () ()
+deleteStatement tableName = Statement sql enc dec True
+  where
+    sql = "DELETE FROM " <> tableName
+    enc = E.noParams
+    dec = D.noResult
+
+delete :: ReadModelConnection -> C.ByteString -> IO ()
+delete connection tableName = do
+  dbResult <- run (statement () (deleteStatement tableName)) connection
+  logOnError dbResult
 
 ---- GAME TIED ----
 
