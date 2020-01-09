@@ -8,7 +8,9 @@ import Control.Monad
 import Data.Aeson
 import qualified Data.ByteString.Char8 as C
 import qualified Data.ByteString.Lazy as BL
+import Data.Either.Combinators (maybeToRight)
 import Data.Foldable
+import Data.Functor
 import Data.Functor.Contravariant
 import Database.PostgreSQL.Simple (ConnectInfo (..), Connection, connectPostgreSQL, execute_, postgreSQLConnectionString)
 import Database.PostgreSQL.Simple.Notification (Notification, getNotification, notificationData)
@@ -34,9 +36,13 @@ main = do
   let rmConnStr = maybe defaultRmConnStr C.pack readModelEnv
   let esConnStr = maybe defaultEsConnStr C.pack eventStoreEnv
   rmConnOrError <- Hasql.Connection.acquire rmConnStr
+  esConnOrError <- Hasql.Connection.acquire esConnStr
   esConn <- connectPostgreSQL esConnStr
-  void $ reBuildReadModel undefined `traverse` rmConnOrError
-  void $ listenAndLoop esConn `traverse` rmConnOrError
+  reBuildResult <- sequence $ reBuildReadModel <$> esConnOrError <*> rmConnOrError
+  case reBuildResult of
+    Left err -> print $ "Could not re-build the read model:\n" <> show err
+    Right _ -> putStrLn "Successfully re-build the read model"
+  traverse_ (listenAndLoop esConn) rmConnOrError
   where
     defaultRmConnStr = Hasql.Connection.settings "localhost" 15432 "postgres" "secret" "postgres"
     defaultEsConnStr = postgreSQLConnectionString $ ConnectInfo "localhost" 5432 "postgres" "secret" "postgres"
@@ -70,8 +76,13 @@ handle connection (VersionedEvent version event) =
 
 reBuildReadModel :: EventStoreConnection -> ReadModelConnection -> IO ()
 reBuildReadModel esConn rmConn = do
-  delete rmConn "games_internal"
-  delete rmConn "challenges_internal"
+  r1 <- delete rmConn "games_internal"
+  r2 <- delete rmConn "challenges_internal"
+  case r1 *> r2 of
+    Left err -> print $ "Deletion of read model failed:\n" <> show err
+    Right _ -> putStrLn "Read model deleted successfully"
+  xs <- events esConn
+  void $ handle rmConn `traverse` xs
 
 ---- ENCODER ----
 
@@ -120,6 +131,10 @@ colorDecoder = D.custom toColor
 movesDecoder :: D.Value [Column]
 movesDecoder = D.array (D.dimension replicateM (D.element (D.nonNullable (Column <$> D.int4))))
 
+eventDecoder :: D.Value Event
+eventDecoder =
+  D.custom (\_ str -> maybeToRight "invalid event format" (decode (BL.fromStrict str)))
+
 ---- DELETE ----
 
 deleteStatement :: C.ByteString -> Statement () ()
@@ -129,10 +144,28 @@ deleteStatement tableName = Statement sql enc dec True
     enc = E.noParams
     dec = D.noResult
 
-delete :: ReadModelConnection -> C.ByteString -> IO ()
-delete connection tableName = do
-  dbResult <- run (statement () (deleteStatement tableName)) connection
-  logOnError dbResult
+delete :: ReadModelConnection -> C.ByteString -> IO (Either QueryError ())
+delete connection tableName = run (statement () (deleteStatement tableName)) connection
+
+---- GET EVENTS ----
+
+selectEvents :: Statement () [VersionedEvent]
+selectEvents = Statement sql encoder decoder True
+  where
+    sql = "SELECT version, data FROM events ORDER BY time_stamp ASC"
+    encoder = E.noParams
+    decoder =
+      D.rowList $
+        VersionedEvent
+          <$> D.column (D.nonNullable (Version <$> D.int4))
+          <*> D.column (D.nonNullable eventDecoder)
+
+events :: ReadModelConnection -> IO [VersionedEvent]
+events connection = do
+  dbResult <- run (statement () selectEvents) connection
+  case dbResult of
+    Left err -> print err $> []
+    Right xs -> pure xs
 
 ---- GAME TIED ----
 
@@ -171,11 +204,10 @@ selectPlayersStatement = Statement sql encoder decoder True
     sql = "SELECT version, player_red, player_yellow FROM games_internal WHERE id=$1"
     encoder = E.param (E.nonNullable streamIdEncoder)
     decoder =
-      D.singleRow
-        ( (,,) <$> D.column (D.nonNullable (Version <$> D.int4))
-            <*> D.column (D.nonNullable (ClientId <$> D.uuid))
-            <*> D.column (D.nonNullable (ClientId <$> D.uuid))
-        )
+      D.singleRow $
+        (,,) <$> D.column (D.nonNullable (Version <$> D.int4))
+          <*> D.column (D.nonNullable (ClientId <$> D.uuid))
+          <*> D.column (D.nonNullable (ClientId <$> D.uuid))
 
 updateGameWonStatement :: Statement (Version, StreamId, GameState) ()
 updateGameWonStatement = Statement sql encoder decoder True
