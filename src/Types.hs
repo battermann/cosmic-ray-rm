@@ -1,21 +1,23 @@
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveGeneric     #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Types where
 
-import Data.Aeson
-import Data.Int
-import Data.UUID
-import GHC.Generics
+import           Data.Aeson
+import           Data.Int
+import           Data.UUID
+import           GHC.Generics
 
-data Color
-  = Yellow
-  | Red
-  deriving (Eq, Show, Generic)
+data Color = Yellow
+    | Red
+    deriving (Eq, Generic)
 
 colorToString :: Color -> String
-colorToString Red = "red"
+colorToString Red    = "red"
 colorToString Yellow = "yellow"
+
+instance Show Color where
+    show = colorToString
 
 instance FromJSON Color
 
@@ -31,26 +33,31 @@ newtype Column = Column Int32 deriving (Eq, Ord, Show, Generic)
 
 instance FromJSON Column
 
-data Event
-  = GameCreated StreamId ClientId Color
-  | GameJoined StreamId ClientId
-  | YellowPlayed StreamId Column
-  | RedPlayed StreamId Column
-  | GameWon StreamId ClientId
-  | GameTied StreamId
-  deriving (Show, Eq, Generic)
+data Event = GameCreated StreamId ClientId Color
+    | GameJoined StreamId ClientId
+    | YellowPlayed StreamId Column
+    | RedPlayed StreamId Column
+    | GameWon StreamId ClientId
+    | GameTied StreamId
+    deriving (Show, Eq, Generic)
 
 instance FromJSON Event
 
-newtype Version = Version Int32
+newtype Offset = Offset Int64
   deriving (Eq, Show, Generic)
 
-instance FromJSON Version
+instance FromJSON Offset
 
-data VersionedEvent = VersionedEvent Version Event
-  deriving (Eq, Show, Generic)
+data OffsetEvent = OffsetEvent
+    { payload :: Event
+    , offset  :: Offset
+    }
+    deriving (Eq, Show, Generic)
 
-instance FromJSON VersionedEvent
+instance FromJSON OffsetEvent
 
-data GameState = InProgress | YellowWon | RedWon | Draw
-  deriving (Eq, Show, Generic)
+data GameState = InProgress
+    | YellowWon
+    | RedWon
+    | Draw
+    deriving (Eq, Show, Generic)
