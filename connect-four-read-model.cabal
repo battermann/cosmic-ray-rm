@@ -27,8 +27,13 @@ executable connect-four-read-model
                      , hasql
                      , hasql-transaction  
                      , contravariant-extras  
-                     , either                             
+                     , either       
+                     , hedis                      
   other-modules:       Types
+                     , EventStream
+                     , ReadModel
+                     , RedisEventStream
+                     , PostgresReadModel
   ghc-options:         -W
                        -Wall
                        -fwarn-tabs

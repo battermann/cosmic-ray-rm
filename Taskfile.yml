@@ -1,0 +1,6 @@
+version: '2'
+
+tasks:
+  fmt:
+    cmds:
+      - stylish-haskell -i src/*
