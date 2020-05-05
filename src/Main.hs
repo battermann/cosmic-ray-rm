@@ -18,7 +18,9 @@ import           Types
 
 main :: IO ()
 main = do
-  redisConnectionString <- fromMaybe "redis://localhost:6379" <$> lookupEnv "REDIS_URL"
+  maybeHerokuRedisConnectionString <- lookupEnv "HEROKU_REDIS_PINK_URL"
+  maybeRedisConnectionString <- lookupEnv "REDIS_URL"
+  let redisConnectionString = fromMaybe "redis://localhost:6379" (maybeHerokuRedisConnectionString `orElse` maybeRedisConnectionString)
   redisConn <- case parseConnectInfo redisConnectionString of
                 Left err   -> error err
                 Right info -> checkedConnect info
@@ -32,6 +34,11 @@ main = do
   loop eventStream readModel
   where
     defaultSettings = Hasql.Connection.settings "localhost" 15432 "postgres" "secret" "postgres"
+
+orElse :: Maybe a -> Maybe a -> Maybe a
+x `orElse` y = case x of
+                 Just _  -> x
+                 Nothing -> y
 
 loop :: EventStream MessageId -> ReadModel -> IO ()
 loop eventStream readModel = do
