@@ -28,7 +28,8 @@ executable connect-four-read-model
                      , hasql-transaction  
                      , contravariant-extras  
                      , either       
-                     , hedis                      
+                     , hedis          
+                     , time            
   other-modules:       Types
                      , EventStream
                      , ReadModel

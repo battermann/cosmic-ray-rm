@@ -5,6 +5,7 @@ module Types where
 
 import           Data.Aeson
 import           Data.Int
+import           Data.Time.Clock (UTCTime)
 import           Data.UUID
 import           GHC.Generics
 
@@ -33,12 +34,12 @@ newtype Column = Column Int32 deriving (Eq, Ord, Show, Generic)
 
 instance FromJSON Column
 
-data Event = GameCreated StreamId ClientId Color
-    | GameJoined StreamId ClientId
-    | YellowPlayed StreamId Column
-    | RedPlayed StreamId Column
-    | GameWon StreamId ClientId
-    | GameTied StreamId
+data Event = GameCreated StreamId UTCTime ClientId Color
+    | GameJoined StreamId UTCTime ClientId
+    | YellowPlayed StreamId UTCTime Column
+    | RedPlayed StreamId UTCTime Column
+    | GameWon StreamId UTCTime ClientId
+    | GameTied StreamId UTCTime
     deriving (Show, Eq, Generic)
 
 instance FromJSON Event

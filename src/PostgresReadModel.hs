@@ -12,6 +12,7 @@ import           Data.Either.Combinators        (maybeToRight)
 import           Data.Foldable
 import           Data.Functor.Contravariant
 import           Data.Maybe                     (fromMaybe)
+import           Data.Time.Clock                (UTCTime)
 import qualified Hasql.Connection
 import qualified Hasql.Decoders                 as D
 import qualified Hasql.Encoders                 as E
@@ -28,12 +29,12 @@ newPostgresReadModel connection = ReadModel { handle = handleEvent connection }
 handleEvent :: Hasql.Connection.Connection -> OffsetEvent -> IO ()
 handleEvent connection event =
   case payload event of
-    GameCreated streamId clientId color -> insertChallenge connection (offset event) streamId clientId color
-    GameJoined streamId clientId -> gameJoined connection (offset event) streamId clientId
-    YellowPlayed streamId column -> played connection (offset event) streamId column
-    RedPlayed streamId column -> played connection (offset event) streamId column
-    GameWon streamId clientId -> gameWon connection (offset event) streamId clientId
-    GameTied streamId -> draw connection (offset event) streamId
+    GameCreated streamId time clientId color -> insertChallenge connection (offset event) streamId clientId color time
+    GameJoined streamId time clientId -> gameJoined connection (offset event) streamId clientId time
+    YellowPlayed streamId time column -> played connection (offset event) streamId column time
+    RedPlayed streamId time column -> played connection (offset event) streamId column time
+    GameWon streamId time clientId -> gameWon connection (offset event) streamId clientId time
+    GameTied streamId time -> draw connection (offset event) streamId time
 
 ---- ENCODER ----
 
@@ -119,28 +120,30 @@ gt (Offset lhs) (Offset rhs) = lhs > rhs
 
 ---- GAME TIED ----
 
-updateGameTiedStatement :: Statement StreamId ()
+updateGameTiedStatement :: Statement (StreamId, UTCTime) ()
 updateGameTiedStatement = Statement sql encoder decoder True
   where
-    sql = "UPDATE games_internal SET game_state='draw' WHERE id=$1"
-    encoder = E.param (E.nonNullable streamIdEncoder)
+    sql = "UPDATE games_internal SET game_state='draw', timestamp=$2 WHERE id=$1"
+    encoder = contrazip2
+     (E.param (E.nonNullable streamIdEncoder))
+     (E.param (E.nonNullable E.timestamptz))
     decoder = D.noResult
 
-updateGameTiedTransaction :: Offset -> StreamId -> Tx.Transaction ()
-updateGameTiedTransaction eventOffset streamId = do
+updateGameTiedTransaction :: Offset -> StreamId -> UTCTime -> Tx.Transaction ()
+updateGameTiedTransaction eventOffset streamId time = do
   maybeLatestOffset <- Tx.statement () selectOffsetStatement
   let latestOffset = fromMaybe (Offset (-1)) maybeLatestOffset
   when (gt eventOffset latestOffset) $ do
-    Tx.statement streamId updateGameTiedStatement
+    Tx.statement (streamId, time) updateGameTiedStatement
     Tx.statement eventOffset updateOffsetStatement
 
-updateGameTiedSession :: Offset -> StreamId -> Session ()
-updateGameTiedSession version streamId =
-  transaction Serializable Write (updateGameTiedTransaction version streamId)
+updateGameTiedSession :: Offset -> StreamId -> UTCTime -> Session ()
+updateGameTiedSession version streamId time =
+  transaction Serializable Write (updateGameTiedTransaction version streamId time)
 
-draw :: Hasql.Connection.Connection -> Offset -> StreamId -> IO ()
-draw connection version streamId = do
-  dbResult <- run (updateGameTiedSession version streamId) connection
+draw :: Hasql.Connection.Connection -> Offset -> StreamId -> UTCTime -> IO ()
+draw connection version streamId time = do
+  dbResult <- run (updateGameTiedSession version streamId time) connection
   crashOnError dbResult
 
 ---- GAME WON ----
@@ -155,34 +158,35 @@ selectPlayersStatement = Statement sql encoder decoder True
         (,) <$> D.column (D.nonNullable (ClientId <$> D.uuid))
           <*> D.column (D.nonNullable (ClientId <$> D.uuid))
 
-updateGameWonStatement :: Statement (StreamId, GameState) ()
+updateGameWonStatement :: Statement (StreamId, GameState, UTCTime) ()
 updateGameWonStatement = Statement sql encoder decoder True
   where
-    sql = "UPDATE games_internal SET game_state=$2 WHERE id=$1"
+    sql = "UPDATE games_internal SET game_state=$2, timestamp=$3 WHERE id=$1"
     encoder =
-      contrazip2
+      contrazip3
         (E.param (E.nonNullable streamIdEncoder))
         (E.param (E.nonNullable gameStateEncoder))
+        (E.param (E.nonNullable E.timestamptz))
     decoder = D.noResult
 
-updateGameWonTransaction :: Offset -> StreamId -> ClientId -> Tx.Transaction ()
-updateGameWonTransaction eventOffset streamId clientId = do
+updateGameWonTransaction :: Offset -> StreamId -> ClientId -> UTCTime -> Tx.Transaction ()
+updateGameWonTransaction eventOffset streamId clientId time = do
   maybeLatestOffset <- Tx.statement () selectOffsetStatement
   let latestOffset = fromMaybe (Offset (-1)) maybeLatestOffset
   when (gt eventOffset latestOffset) $ do
     (playerRed, playerYellow) <- Tx.statement streamId selectPlayersStatement
     if playerRed == clientId
-      then Tx.statement (streamId, RedWon) updateGameWonStatement
-      else when (playerYellow == clientId) $ Tx.statement (streamId, YellowWon) updateGameWonStatement
+      then Tx.statement (streamId, RedWon, time) updateGameWonStatement
+      else when (playerYellow == clientId) $ Tx.statement (streamId, YellowWon, time) updateGameWonStatement
     Tx.statement eventOffset updateOffsetStatement
 
-updateGameWonSession :: Offset -> StreamId -> ClientId -> Session ()
-updateGameWonSession eventOffset streamId clientId =
-  transaction Serializable Write (updateGameWonTransaction eventOffset streamId clientId)
+updateGameWonSession :: Offset -> StreamId -> ClientId -> UTCTime -> Session ()
+updateGameWonSession eventOffset streamId clientId time =
+  transaction Serializable Write (updateGameWonTransaction eventOffset streamId clientId time)
 
-gameWon :: Hasql.Connection.Connection -> Offset -> StreamId -> ClientId -> IO ()
-gameWon connection eventOffset streamId clientId = do
-  dbResult <- run (updateGameWonSession eventOffset streamId clientId) connection
+gameWon :: Hasql.Connection.Connection -> Offset -> StreamId -> ClientId -> UTCTime -> IO ()
+gameWon connection eventOffset streamId clientId time = do
+  dbResult <- run (updateGameWonSession eventOffset streamId clientId time) connection
   crashOnError dbResult
 
 ---- YELLOW/RED PLAYED ----
@@ -194,62 +198,64 @@ selectMovesStatement = Statement sql encoder decoder True
     encoder = E.param (E.nonNullable streamIdEncoder)
     decoder = D.singleRow $ D.column (D.nonNullable movesDecoder)
 
-updateGameStatement :: Statement ([Column], StreamId) ()
+updateGameStatement :: Statement ([Column], StreamId, UTCTime) ()
 updateGameStatement = Statement sql encoder decoder True
   where
-    sql = "UPDATE games_internal SET moves=$1 WHERE id=$2"
+    sql = "UPDATE games_internal SET moves=$1, timestamp=$3 WHERE id=$2"
     encoder =
-      contrazip2
+      contrazip3
         (E.param (E.nonNullable movesEncoder))
         (E.param (E.nonNullable streamIdEncoder))
+        (E.param (E.nonNullable E.timestamptz))
     decoder = D.noResult
 
-updateGameTransaction :: Offset -> StreamId -> Column -> Tx.Transaction ()
-updateGameTransaction eventOffset streamId column = do
+updateGameTransaction :: Offset -> StreamId -> Column -> UTCTime -> Tx.Transaction ()
+updateGameTransaction eventOffset streamId column time = do
   maybeLatestOffset <- Tx.statement () selectOffsetStatement
   let latestOffset = fromMaybe (Offset (-1)) maybeLatestOffset
   when (gt eventOffset latestOffset) $ do
     moves <- Tx.statement streamId selectMovesStatement
-    Tx.statement (moves ++ [column], streamId) updateGameStatement
+    Tx.statement (moves ++ [column], streamId, time) updateGameStatement
     Tx.statement eventOffset updateOffsetStatement
 
-updateGameSession :: Offset -> StreamId -> Column -> Session ()
-updateGameSession eventOffset streamId column =
-  transaction Serializable Write (updateGameTransaction eventOffset streamId column)
+updateGameSession :: Offset -> StreamId -> Column -> UTCTime -> Session ()
+updateGameSession eventOffset streamId column time =
+  transaction Serializable Write (updateGameTransaction eventOffset streamId column time)
 
-played :: Hasql.Connection.Connection -> Offset -> StreamId -> Column -> IO ()
-played connection eventOffset streamId column = do
-  dbResult <- run (updateGameSession eventOffset streamId column) connection
+played :: Hasql.Connection.Connection -> Offset -> StreamId -> Column -> UTCTime -> IO ()
+played connection eventOffset streamId column time = do
+  dbResult <- run (updateGameSession eventOffset streamId column time) connection
   crashOnError dbResult
 
 ---- GAME CREATED ----
 
-insertChallengeStatement :: Statement (StreamId, ClientId, Color) ()
+insertChallengeStatement :: Statement (StreamId, ClientId, Color, UTCTime) ()
 insertChallengeStatement = Statement sql encoder decoder True
   where
-    sql = "INSERT INTO challenges_internal (id, client_id, color) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING"
+    sql = "INSERT INTO challenges_internal (id, client_id, color, timestamp) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING"
     encoder =
-      contrazip3
+      contrazip4
         (E.param (E.nonNullable streamIdEncoder))
         (E.param (E.nonNullable clientIdEncoder))
         (E.param (E.nonNullable colorEncoder))
+        (E.param (E.nonNullable E.timestamptz))
     decoder = D.noResult
 
-insertChallengeTransaction :: Offset -> StreamId -> ClientId -> Color -> Tx.Transaction ()
-insertChallengeTransaction eventOffset streamId clientId color = do
+insertChallengeTransaction :: Offset -> StreamId -> ClientId -> Color -> UTCTime -> Tx.Transaction ()
+insertChallengeTransaction eventOffset streamId clientId color time = do
   maybeLatestOffset <- Tx.statement () selectOffsetStatement
   let latestOffset = fromMaybe (Offset (-1)) maybeLatestOffset
   when (gt eventOffset latestOffset) $ do
-    Tx.statement (streamId, clientId, color) insertChallengeStatement
+    Tx.statement (streamId, clientId, color, time) insertChallengeStatement
     Tx.statement eventOffset updateOffsetStatement
 
-insertChallengeSession :: Offset -> StreamId -> ClientId -> Color -> Session ()
-insertChallengeSession eventOffset streamId clientId color =
-  transaction Serializable Write (insertChallengeTransaction eventOffset streamId clientId color)
+insertChallengeSession :: Offset -> StreamId -> ClientId -> Color -> UTCTime -> Session ()
+insertChallengeSession eventOffset streamId clientId color time =
+  transaction Serializable Write (insertChallengeTransaction eventOffset streamId clientId color time)
 
-insertChallenge :: Hasql.Connection.Connection -> Offset -> StreamId -> ClientId -> Color -> IO ()
-insertChallenge conn eventOffset streamId clientId color = do
-  dbResult <- run (insertChallengeSession eventOffset streamId clientId color) conn
+insertChallenge :: Hasql.Connection.Connection -> Offset -> StreamId -> ClientId -> Color -> UTCTime -> IO ()
+insertChallenge conn eventOffset streamId clientId color time = do
+  dbResult <- run (insertChallengeSession eventOffset streamId clientId color time) conn
   crashOnError dbResult
 
 ---- GAME JOINED ----
@@ -261,17 +267,18 @@ selectChallengeStatement = Statement sql encoder decoder True
     encoder = E.param (E.nonNullable streamIdEncoder)
     decoder = D.singleRow ((,) <$> D.column (D.nonNullable (ClientId <$> D.uuid)) <*> D.column (D.nonNullable colorDecoder))
 
-insertGameStatement :: Statement (StreamId, GameState, [Column], ClientId, ClientId) ()
+insertGameStatement :: Statement (StreamId, GameState, [Column], ClientId, ClientId, UTCTime) ()
 insertGameStatement = Statement sql encoder decoder True
   where
-    sql = "INSERT INTO games_internal (id, game_state, moves, player_red, player_yellow) VALUES ($1, $2, $3, $4, $5)"
+    sql = "INSERT INTO games_internal (id, game_state, moves, player_red, player_yellow, timestamp) VALUES ($1, $2, $3, $4, $5, $6)"
     encoder =
-      contrazip5
+      contrazip6
         (E.param (E.nonNullable streamIdEncoder))
         (E.param (E.nonNullable gameStateEncoder))
         (E.param (E.nonNullable movesEncoder))
         (E.param (E.nonNullable clientIdEncoder))
         (E.param (E.nonNullable clientIdEncoder))
+        (E.param (E.nonNullable E.timestamptz))
     decoder = D.noResult
 
 deleteChallengeStatement :: Statement StreamId ()
@@ -281,26 +288,26 @@ deleteChallengeStatement = Statement sql encoder decoder True
     encoder = E.param (E.nonNullable streamIdEncoder)
     decoder = D.noResult
 
-insertGameTransaction :: Offset -> StreamId -> ClientId -> Tx.Transaction ()
-insertGameTransaction eventOffset streamId clientId = do
+insertGameTransaction :: Offset -> StreamId -> ClientId -> UTCTime -> Tx.Transaction ()
+insertGameTransaction eventOffset streamId clientId time = do
   maybeLatestOffset <- Tx.statement () selectOffsetStatement
   let latestOffset = fromMaybe (Offset (-1)) maybeLatestOffset
   when (gt eventOffset latestOffset) $ do
     (opponentId, opponentColor) <- Tx.statement streamId selectChallengeStatement
     let params = case opponentColor of
-          Red    -> (streamId, InProgress, [], opponentId, clientId)
-          Yellow -> (streamId, InProgress, [], clientId, opponentId)
+          Red    -> (streamId, InProgress, [], opponentId, clientId, time)
+          Yellow -> (streamId, InProgress, [], clientId, opponentId, time)
     Tx.statement params insertGameStatement
     Tx.statement streamId deleteChallengeStatement
     Tx.statement eventOffset updateOffsetStatement
 
-insertGameSession :: Offset -> StreamId -> ClientId -> Session ()
-insertGameSession eventOffset streamId clientId =
-  transaction Serializable Write (insertGameTransaction eventOffset streamId clientId)
+insertGameSession :: Offset -> StreamId -> ClientId -> UTCTime -> Session ()
+insertGameSession eventOffset streamId clientId time =
+  transaction Serializable Write (insertGameTransaction eventOffset streamId clientId time)
 
-gameJoined :: Hasql.Connection.Connection -> Offset -> StreamId -> ClientId -> IO ()
-gameJoined connection eventOffset streamId clientId = do
-  dbResult <- run (insertGameSession eventOffset streamId clientId) connection
+gameJoined :: Hasql.Connection.Connection -> Offset -> StreamId -> ClientId -> UTCTime -> IO ()
+gameJoined connection eventOffset streamId clientId time = do
+  dbResult <- run (insertGameSession eventOffset streamId clientId time) connection
   crashOnError dbResult
 
 crashOnError :: Show e => Either e a -> IO ()

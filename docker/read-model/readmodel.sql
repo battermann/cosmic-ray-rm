@@ -28,6 +28,7 @@ INSERT INTO player (value)
 
 CREATE TABLE games_internal (
     id uuid NOT NULL PRIMARY KEY,
+    timestamp timestamptz NOT NULL,
     serial_id serial NOT NULL,
     game_state text NOT NULL REFERENCES game_state (value),
     moves integer[] NOT NULL,
@@ -53,16 +54,18 @@ CREATE FUNCTION game (my_id uuid, game_id uuid)
                 WHEN my_id = player_yellow THEN ''yellow''
                 ELSE ''none''
             END
-    FROM games_internal
-    WHERE id = game_id
+            FROM games_internal
+            WHERE id = game_id
 '
     LANGUAGE sql
     STABLE;
 
 CREATE FUNCTION live_games (my_id uuid)
     RETURNS SETOF games AS '   SELECT id, serial_id, game_state, moves, ''none''
-    FROM games_internal
-    WHERE player_red <> my_id AND player_yellow <> my_id
+            FROM games_internal
+            WHERE player_red <> my_id AND player_yellow <> my_id
+              AND timestamp > now() - interval ''2 days''
+            ORDER BY timestamp DESC
 '
     LANGUAGE sql
     STABLE;
@@ -76,14 +79,17 @@ CREATE FUNCTION my_games (my_id uuid)
                 WHEN my_id = player_yellow THEN ''yellow''
                 ELSE ''none''
             END
-    FROM games_internal
-    WHERE player_red = my_id OR player_yellow = my_id
+            FROM games_internal
+            WHERE player_red = my_id OR player_yellow = my_id
+              AND timestamp > now() - interval ''4 days''
+            ORDER BY timestamp DESC
 '
     LANGUAGE sql
     STABLE;
 
 CREATE TABLE challenges_internal (
     id uuid NOT NULL PRIMARY KEY,
+    timestamp timestamptz NOT NULL,
     serial_id serial NOT NULL,
     client_id uuid NOT NULL,
     color text NOT NULL REFERENCES color (value)
@@ -97,16 +103,20 @@ CREATE TABLE challenges (
 
 CREATE FUNCTION villain_challenges (my_id uuid)
     RETURNS SETOF challenges AS '   SELECT id, serial_id, color
-    FROM challenges_internal
-    WHERE client_id <> my_id
+            FROM challenges_internal
+            WHERE client_id <> my_id
+              AND timestamp > now() - interval ''1 days''
+            ORDER BY timestamp DESC
 '
     LANGUAGE sql
     STABLE;
 
 CREATE FUNCTION my_challenges (my_id uuid)
     RETURNS SETOF challenges AS '   SELECT id, serial_id, color
-    FROM challenges_internal
-    WHERE client_id = my_id
+            FROM challenges_internal
+            WHERE client_id = my_id
+              AND timestamp > now() - interval ''1 days''
+            ORDER BY timestamp DESC
 '
     LANGUAGE sql
     STABLE;
