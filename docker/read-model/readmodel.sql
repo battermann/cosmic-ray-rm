@@ -44,7 +44,7 @@ CREATE TABLE games (
     player text NOT NULL REFERENCES player (value)
 );
 
-CREATE FUNCTION game (my_id uuid, game_id uuid)
+CREATE OR REPLACE FUNCTION game (my_id uuid, game_id uuid)
     RETURNS SETOF games
     AS '   SELECT id,
             serial_id,
@@ -60,7 +60,7 @@ CREATE FUNCTION game (my_id uuid, game_id uuid)
     LANGUAGE sql
     STABLE;
 
-CREATE FUNCTION live_games (my_id uuid)
+CREATE OR REPLACE FUNCTION live_games (my_id uuid)
     RETURNS SETOF games AS '   SELECT id, serial_id, game_state, moves, ''none''
             FROM games_internal
             WHERE player_red <> my_id AND player_yellow <> my_id
@@ -70,7 +70,7 @@ CREATE FUNCTION live_games (my_id uuid)
     LANGUAGE sql
     STABLE;
 
-CREATE FUNCTION my_games (my_id uuid)
+CREATE OR REPLACE FUNCTION my_games (my_id uuid)
     RETURNS SETOF games AS '   SELECT id,
             serial_id,
             game_state,
@@ -101,7 +101,7 @@ CREATE TABLE challenges (
     color text NOT NULL REFERENCES color (value)
 );
 
-CREATE FUNCTION villain_challenges (my_id uuid)
+CREATE OR REPLACE FUNCTION villain_challenges (my_id uuid)
     RETURNS SETOF challenges AS '   SELECT id, serial_id, color
             FROM challenges_internal
             WHERE client_id <> my_id
@@ -111,7 +111,7 @@ CREATE FUNCTION villain_challenges (my_id uuid)
     LANGUAGE sql
     STABLE;
 
-CREATE FUNCTION my_challenges (my_id uuid)
+CREATE OR REPLACE FUNCTION my_challenges (my_id uuid)
     RETURNS SETOF challenges AS '   SELECT id, serial_id, color
             FROM challenges_internal
             WHERE client_id = my_id
